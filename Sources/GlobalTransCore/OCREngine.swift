@@ -9,7 +9,7 @@ public struct OCRRequest: Sendable {
     public var maxTokens: Int
     public var maxPixels: Int
 
-    public init(image: CIImage, maxTokens: Int = 2048, maxPixels: Int = 1_638_400) {
+    public init(image: CIImage, maxTokens: Int = 2048, maxPixels: Int = OCRInputSettings.pixels(percent: OCRInputSettings.defaultPercent)) {
         self.image = image
         self.maxTokens = maxTokens
         self.maxPixels = maxPixels
@@ -42,12 +42,19 @@ public enum OCREngineError: LocalizedError {
 
 public struct TranslateRequest: Sendable {
     public var text: String
-    public var chineseSource: Bool
+    public var sourceLanguage: TranslateLanguage
+    public var targetLanguage: TranslateLanguage
     public var maxTokens: Int
 
-    public init(text: String, chineseSource: Bool, maxTokens: Int = 4096) {
+    public init(
+        text: String,
+        sourceLanguage: TranslateLanguage = .auto,
+        targetLanguage: TranslateLanguage = .auto,
+        maxTokens: Int = 4096
+    ) {
         self.text = text
-        self.chineseSource = chineseSource
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
         self.maxTokens = maxTokens
     }
 }

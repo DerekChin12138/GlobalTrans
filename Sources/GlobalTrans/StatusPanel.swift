@@ -1,4 +1,5 @@
 import AppKit
+import GlobalTransCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -14,6 +15,10 @@ struct StatusPanel: View {
                 Text(model.statusLabel)
                     .font(.headline)
                 Spacer()
+                Button("Quit") {
+                    NSApp.terminate(nil)
+                }
+                .controlSize(.small)
             }
 
             sourceSwitch(
@@ -44,23 +49,31 @@ struct StatusPanel: View {
                 .disabled(!model.modelLoaded)
 
                 Spacer()
-
-                Button("Quit") {
-                    NSApp.terminate(nil)
-                }
             }
             .controlSize(.small)
 
             HStack(spacing: 8) {
-                Button(model.pendingOCRCount > 0 ? "OCR (\(model.pendingOCRCount))" : "OCR") {
-                    Task { await model.runOCR() }
+                if model.pendingOCRCount > 1 {
+                    Button("OCR All (\(model.pendingOCRCount))") {
+                        Task { await model.runOCR(onlySelected: false) }
+                    }
+                    .disabled(!model.canRunAllOCR)
                 }
-                .disabled(!model.canRunOCR)
 
-                Button(model.pendingTranslateCount > 0 ? "Translate (\(model.pendingTranslateCount))" : "Translate") {
-                    Task { await model.runTranslate() }
+                if model.pendingTranslateCount > 1 {
+                    Button("Translate All (\(model.pendingTranslateCount))") {
+                        Task { await model.runTranslate(onlySelected: false) }
+                    }
+                    .disabled(!model.canRunAllTranslate)
                 }
-                .disabled(!model.canRunTranslate)
+
+                Button("Merge…") {
+                    model.prepareMergeWorkspace()
+                    openWindow(id: "ocr-merge")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .disabled(!model.canOpenMerge)
+                .help("Combine OCR texts in a new window")
 
                 Spacer()
             }
@@ -68,10 +81,80 @@ struct StatusPanel: View {
 
             CaptureStrip(model: model)
 
-            Group {
-                labeledEditor(title: "OCR", text: model.originalText, copy: model.copyOriginal)
-                labeledEditor(title: "Translation", text: model.translatedText, copy: model.copyTranslation)
+            HStack(spacing: 8) {
+                Text("Translate to")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Translate to", selection: $model.targetLanguage) {
+                    ForEach(TranslateLanguage.allCases) { language in
+                        Text(language.menuLabel).tag(language)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.mini)
+                .frame(maxWidth: .infinity)
+                .disabled(model.isBusy)
             }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("OCR input")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int((model.ocrInputPercent * 100).rounded()))% · \(OCRInputSettings.megapixelsLabel(model.ocrPixelBudget)) / \(OCRInputSettings.megapixelsLabel(OCRInputSettings.officialMaxPixels))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(
+                    value: $model.ocrInputPercent,
+                    in: OCRInputSettings.minPercent...OCRInputSettings.maxPercent,
+                    step: 0.05
+                )
+                .controlSize(.mini)
+                .disabled(model.isBusy)
+                .help("100% is OvisOCR2’s official max of 2880×2880 pixels. Images larger than the budget are downscaled before OCR.")
+            }
+
+            VStack(spacing: 10) {
+                ResultPane(
+                    title: "OCR",
+                    text: model.originalText,
+                    copy: model.copyOriginal,
+                    popOut: { openPreview(.ocr) },
+                    compact: true,
+                    documentID: model.selectedCapture?.id,
+                    editText: model.editableOCRText,
+                    onEdit: model.canEditOCR
+                        ? { text in
+                            if let id = model.selectedCapture?.id {
+                                model.setOCRText(text, for: id)
+                            }
+                        }
+                        : nil,
+                    actionTitle: "OCR",
+                    actionEnabled: model.canRunOCR,
+                    actionHelp: "OCR the selected screenshot",
+                    action: {
+                        Task { await model.runOCR(onlySelected: true) }
+                    }
+                )
+                ResultPane(
+                    title: "Translation",
+                    text: model.translatedText,
+                    copy: model.copyTranslation,
+                    popOut: { openPreview(.translation) },
+                    documentID: model.selectedCapture?.id,
+                    actionTitle: "Translate",
+                    actionEnabled: model.canRunTranslate,
+                    actionHelp: "Translate the selected screenshot",
+                    action: {
+                        Task { await model.runTranslate(onlySelected: true) }
+                    }
+                )
+            }
+            .layoutPriority(1)
 
             if case .failed = model.phase {
                 Button("Open Screen Recording Settings") {
@@ -96,7 +179,11 @@ struct StatusPanel: View {
                 .foregroundStyle(.secondary)
         }
         .padding(14)
-        .frame(width: 420, height: 600)
+        .frame(width: 420, height: 700)
+        .background(StatusPanelWindowMarker())
+        .onAppear {
+            StatusItemContextMenu.install()
+        }
         .fileImporter(
             isPresented: $importerPresented,
             allowedContentTypes: [.pdf, .png, .jpeg, .heic, .tiff, .image]
@@ -112,27 +199,9 @@ struct StatusPanel: View {
         }
     }
 
-    private func labeledEditor(title: String, text: String, copy: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Copy", action: copy)
-                    .controlSize(.mini)
-                    .disabled(text.isEmpty)
-            }
-            ScrollView {
-                Text(text.isEmpty ? "—" : text)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(minHeight: 88)
-            .padding(8)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-        }
+    private func openPreview(_ kind: PreviewWindowID) {
+        openWindow(id: "preview", value: kind)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func sourceSwitch(title: String, isRemote: Binding<Bool>, path: String) -> some View {
@@ -173,10 +242,11 @@ private struct CaptureStrip: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
-                ForEach(model.captures) { item in
+                ForEach(Array(model.captures.enumerated()), id: \.element.id) { index, item in
                     CaptureThumb(
                         item: item,
-                        selected: item.id == model.selectedCapture?.id,
+                        index: index + 1,
+                        selected: item.id == model.selectedID,
                         onSelect: { model.selectCapture(item.id) },
                         onRemove: { model.removeCapture(item.id) }
                     )
@@ -197,45 +267,80 @@ private struct CaptureStrip: View {
 
 private struct CaptureThumb: View {
     let item: CaptureItem
+    let index: Int
     let selected: Bool
     let onSelect: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Button(action: onSelect) {
-                Image(nsImage: item.thumbnail)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 64, height: 52)
-                    .clipped()
-                    .overlay(alignment: .bottom) {
-                        Text(item.stage.badge)
-                            .font(.system(size: 8, weight: .semibold))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(.thinMaterial)
-                            .clipShape(Capsule())
-                            .padding(.bottom, 2)
-                    }
-            }
-            .buttonStyle(.plain)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: selected ? 2 : 1)
-            )
+            Image(nsImage: item.thumbnail)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 64, height: 52)
+                .clipped()
+                .overlay(alignment: .bottomLeading) {
+                    Text("\(index)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(3)
+                }
+                .overlay(alignment: .bottom) {
+                    Text(item.stage.badge)
+                        .font(.system(size: 8, weight: .semibold))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.thinMaterial)
+                        .clipShape(Capsule())
+                        .padding(.bottom, 2)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: selected ? 2 : 1)
+                )
 
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.65))
+                    .foregroundStyle(.white, .black.opacity(0.7))
             }
             .buttonStyle(.plain)
-            .offset(x: 3, y: -3)
+            .frame(width: 16, height: 16)
+            .contentShape(Rectangle())
+            .offset(x: 2, y: -2)
+            .zIndex(2)
         }
         .frame(width: 64, height: 52)
-        .help(item.stage.badge)
+        .clipped()
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .help("Screenshot \(index) · \(item.stage.badge)")
+    }
+}
+
+private struct StatusPanelWindowMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            configure(view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            configure(nsView.window)
+        }
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.identifier = NSUserInterfaceItemIdentifier(StatusPanelHider.panelWindowID)
+        window.styleMask.remove(.resizable)
     }
 }

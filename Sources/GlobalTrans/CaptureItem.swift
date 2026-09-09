@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import Foundation
+import GlobalTransCore
 
 enum CaptureKind: Equatable {
     case screen
@@ -47,28 +48,34 @@ struct CaptureItem: Identifiable {
     let id: UUID
     let createdAt: Date
     let kind: CaptureKind
-    let maxTokens: Int
-    let maxPixels: Int
     let image: CIImage
     let thumbnail: NSImage
     var ocrText = ""
     var translatedText = ""
+    var translatedTarget: TranslateLanguage?
     var stage: CaptureStage = .queued
+
+    func needsTranslate(to target: TranslateLanguage) -> Bool {
+        switch stage {
+        case .ocrReady, .translateFailed:
+            return true
+        case .translated:
+            return translatedTarget != target
+        default:
+            return false
+        }
+    }
 
     static let cacheLimit = 5
 
     static func make(
         image: CIImage,
-        kind: CaptureKind,
-        maxTokens: Int,
-        maxPixels: Int
+        kind: CaptureKind
     ) -> CaptureItem {
         CaptureItem(
             id: UUID(),
             createdAt: Date(),
             kind: kind,
-            maxTokens: maxTokens,
-            maxPixels: maxPixels,
             image: image,
             thumbnail: thumbnailImage(from: image)
         )

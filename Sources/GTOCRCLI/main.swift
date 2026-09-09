@@ -43,10 +43,9 @@ struct GTOCRCLI {
     }
 
     static func runTranslate(_ text: String) async throws {
-        let chineseSource = text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
         let engine = TranslationEngine()
         let result = try await engine.translate(
-            TranslateRequest(text: text, chineseSource: chineseSource, maxTokens: 256)
+            TranslateRequest(text: text, maxTokens: 256)
         )
         print(result.text)
         print("\n---\nelapsed \(format(result.elapsed))", terminator: "\n")

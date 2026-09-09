@@ -2,11 +2,19 @@ import AppKit
 
 @MainActor
 enum StatusPanelHider {
+    static let panelWindowID = "GTStatusPanel"
     private static var hidden: [NSWindow] = []
 
     static func hide() async {
         hidden = NSApp.windows.filter { window in
-            window.isVisible && window.level != .screenSaver
+            window.isVisible
+                && window.level != .screenSaver
+                && window.identifier?.rawValue == panelWindowID
+        }
+        if hidden.isEmpty {
+            hidden = NSApp.windows.filter { window in
+                window.isVisible && window.level != .screenSaver && window.title.isEmpty
+            }
         }
         for window in hidden {
             window.orderOut(nil)

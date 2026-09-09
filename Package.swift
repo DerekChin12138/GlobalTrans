@@ -15,6 +15,8 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.31.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.1"),
+        .package(url: "https://github.com/mgriebling/SwiftMath.git", from: "1.7.3"),
     ],
     targets: [
         .target(
@@ -36,7 +38,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "GlobalTrans",
-            dependencies: ["GlobalTransCore"],
+            dependencies: [
+                "GlobalTransCore",
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "SwiftMath", package: "SwiftMath"),
+            ],
             path: "Sources/GlobalTrans",
             swiftSettings: [
                 .swiftLanguageMode(.v5)

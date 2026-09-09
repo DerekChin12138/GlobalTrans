@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import Foundation
 import GlobalTransCore
 import Observation
@@ -26,6 +27,21 @@ final class AppModel {
     var hidePanelOnCapture: Bool = true {
         didSet {
             UserDefaults.standard.set(hidePanelOnCapture, forKey: Self.hidePanelOnCaptureKey)
+        }
+    }
+    var targetLanguage: TranslateLanguage = .auto {
+        didSet {
+            UserDefaults.standard.set(targetLanguage.rawValue, forKey: Self.targetLanguageKey)
+        }
+    }
+    var ocrInputPercent: Double = OCRInputSettings.defaultPercent {
+        didSet {
+            let clamped = OCRInputSettings.clampedPercent(ocrInputPercent)
+            if clamped != ocrInputPercent {
+                ocrInputPercent = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Self.ocrInputPercentKey)
         }
     }
     var remote: RemoteAPISettings = RemoteAPIStore.load() {
@@ -83,10 +99,21 @@ final class AppModel {
     private var jobTotal = 0
 
     private static let hidePanelOnCaptureKey = "GTHidePanelOnCapture"
+    private static let targetLanguageKey = "GTTranslateTargetLang"
+    private static let ocrInputPercentKey = "GTOcrInputPercent"
 
     private init() {
         if UserDefaults.standard.object(forKey: Self.hidePanelOnCaptureKey) != nil {
             hidePanelOnCapture = UserDefaults.standard.bool(forKey: Self.hidePanelOnCaptureKey)
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.targetLanguageKey),
+           let language = TranslateLanguage(rawValue: raw) {
+            targetLanguage = language
+        }
+        if UserDefaults.standard.object(forKey: Self.ocrInputPercentKey) != nil {
+            ocrInputPercent = OCRInputSettings.clampedPercent(
+                UserDefaults.standard.double(forKey: Self.ocrInputPercentKey)
+            )
         }
     }
 
@@ -110,7 +137,7 @@ final class AppModel {
     }
 
     var pendingOCRCount: Int { captures.filter { $0.stage.needsOCR }.count }
-    var pendingTranslateCount: Int { captures.filter { $0.stage.needsTranslate }.count }
+    var pendingTranslateCount: Int { captures.filter { $0.needsTranslate(to: targetLanguage) }.count }
     var cacheIsFull: Bool { captures.count >= CaptureItem.cacheLimit }
 
     var isBusy: Bool {
@@ -121,8 +148,19 @@ final class AppModel {
     }
 
     var canAddCapture: Bool { !cacheIsFull && phase != .selecting }
-    var canRunOCR: Bool { pendingOCRCount > 0 && !isBusy }
-    var canRunTranslate: Bool { pendingTranslateCount > 0 && !isBusy }
+    var canRunOCR: Bool { selectedCapture?.stage.needsOCR == true && !isBusy }
+    var canRunTranslate: Bool { selectedCapture?.needsTranslate(to: targetLanguage) == true && !isBusy }
+    var canRunAllOCR: Bool { pendingOCRCount > 1 && !isBusy }
+    var canRunAllTranslate: Bool { pendingTranslateCount > 1 && !isBusy }
+    var canEditOCR: Bool { selectedCapture != nil && !isBusy }
+    var canOpenMerge: Bool {
+        !isBusy && captures.contains { !$0.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+    var editableOCRText: String { selectedCapture?.ocrText ?? "" }
+    var ocrPixelBudget: Int { OCRInputSettings.pixels(percent: ocrInputPercent) }
+
+    var mergeDraft = ""
+    var mergeTranslation = ""
 
     var statusLabel: String {
         switch phase {
@@ -188,7 +226,7 @@ final class AppModel {
         do {
             let cgImage = try await ScreenGrabber.capture(rectInScreen: rect)
             if hidePanel { StatusPanelHider.restore() }
-            enqueue(CIImage(cgImage: cgImage), kind: .screen, maxTokens: 2048, maxPixels: 1_638_400)
+            enqueue(CIImage(cgImage: cgImage), kind: .screen)
         } catch {
             if hidePanel { StatusPanelHider.restore() }
             phase = .failed(error.localizedDescription)
@@ -208,16 +246,22 @@ final class AppModel {
                 if accessing { url.stopAccessingSecurityScopedResource() }
             }
             let image = try DocumentImporter.loadCIImage(from: url)
-            enqueue(image, kind: .file, maxTokens: 4096, maxPixels: 2_985_984)
+            enqueue(image, kind: .file)
         } catch {
             phase = .failed(error.localizedDescription)
         }
     }
 
-    func runOCR() async {
-        guard canRunOCR else { return }
+    func runOCR(onlySelected: Bool = true) async {
+        guard onlySelected ? canRunOCR : (pendingOCRCount > 0 && !isBusy) else { return }
         cancelUnload()
-        let jobs = captures.filter { $0.stage.needsOCR }
+        let jobs: [CaptureItem]
+        if onlySelected, let item = selectedCapture, item.stage.needsOCR {
+            jobs = [item]
+        } else {
+            jobs = captures.filter { $0.stage.needsOCR }
+        }
+        guard !jobs.isEmpty else { return }
         jobTotal = jobs.count
         jobIndex = 0
         do {
@@ -235,10 +279,16 @@ final class AppModel {
         }
     }
 
-    func runTranslate() async {
-        guard canRunTranslate else { return }
+    func runTranslate(onlySelected: Bool = true) async {
+        guard onlySelected ? canRunTranslate : (pendingTranslateCount > 0 && !isBusy) else { return }
         cancelUnload()
-        let jobs = captures.filter { $0.stage.needsTranslate }
+        let jobs: [CaptureItem]
+        if onlySelected, let item = selectedCapture, item.needsTranslate(to: targetLanguage) {
+            jobs = [item]
+        } else {
+            jobs = captures.filter { $0.needsTranslate(to: targetLanguage) }
+        }
+        guard !jobs.isEmpty else { return }
         jobTotal = jobs.count
         jobIndex = 0
         do {
@@ -248,10 +298,12 @@ final class AppModel {
                 guard captures.contains(where: { $0.id == job.id }) else { continue }
                 await translateItem(job)
             }
+            await translator.unload()
             await refreshLoadedFlag()
             phase = .ready
-            if modelLoaded { scheduleUnload() }
         } catch {
+            await translator.unload()
+            await refreshLoadedFlag()
             phase = .failed(error.localizedDescription)
         }
     }
@@ -264,6 +316,93 @@ final class AppModel {
     func copyTranslation() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(translatedText, forType: .string)
+    }
+
+    func setOCRText(_ text: String, for id: UUID) {
+        guard !isBusy else { return }
+        updateCapture(id) { capture in
+            guard capture.ocrText != text else { return }
+            capture.ocrText = text
+            capture.translatedText = ""
+            capture.translatedTarget = nil
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if capture.stage != .queued && capture.stage != .recognizing {
+                    capture.stage = .queued
+                }
+            } else {
+                capture.stage = .ocrReady
+            }
+        }
+    }
+
+    func prepareMergeWorkspace() {
+        if mergeDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mergeDraft = joinedOCRTexts()
+        }
+    }
+
+    func resetMergeDraft() {
+        mergeDraft = joinedOCRTexts()
+        mergeTranslation = ""
+    }
+
+    func insertOCRIntoMerge(_ id: UUID) {
+        guard let text = captures.first(where: { $0.id == id })?.ocrText
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty
+        else { return }
+        if mergeDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mergeDraft = text
+        } else {
+            mergeDraft += "\n\n" + text
+        }
+    }
+
+    func copyMergeDraft() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(mergeDraft, forType: .string)
+    }
+
+    func copyMergeTranslation() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(mergeTranslation, forType: .string)
+    }
+
+    func translateMergeDraft() async {
+        let text = mergeDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isBusy else { return }
+        cancelUnload()
+        do {
+            try await prepareTranslate()
+            let request = TranslateRequest(
+                text: text,
+                sourceLanguage: .auto,
+                targetLanguage: targetLanguage,
+                maxTokens: min(4096, max(384, text.count * 2))
+            )
+            let result: OCRResult
+            if remote.useRemoteTranslate {
+                result = try await OpenAICompatibleClient(settings: remote).translate(request)
+            } else {
+                result = try await translator.translate(request)
+            }
+            mergeTranslation = result.text
+            await translator.unload()
+            await refreshLoadedFlag()
+            phase = captures.isEmpty ? .idle : .ready
+        } catch {
+            mergeTranslation = error.localizedDescription
+            await translator.unload()
+            await refreshLoadedFlag()
+            phase = captures.isEmpty ? .idle : .ready
+        }
+    }
+
+    private func joinedOCRTexts() -> String {
+        captures
+            .map { $0.ocrText.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
     }
 
     func chooseOCRFolder() -> String {
@@ -352,17 +491,12 @@ final class AppModel {
         modelLoaded = ocrLoaded || mtLoaded
     }
 
-    private func enqueue(_ image: CIImage, kind: CaptureKind, maxTokens: Int, maxPixels: Int) {
+    private func enqueue(_ image: CIImage, kind: CaptureKind) {
         guard captures.count < CaptureItem.cacheLimit else {
             phase = .failed("Screenshot cache is full (\(CaptureItem.cacheLimit)). Remove one first.")
             return
         }
-        let item = CaptureItem.make(
-            image: image,
-            kind: kind,
-            maxTokens: maxTokens,
-            maxPixels: maxPixels
-        )
+        let item = CaptureItem.make(image: image, kind: kind)
         captures.append(item)
         selectedID = item.id
         phase = .ready
@@ -414,8 +548,8 @@ final class AppModel {
         updateCapture(item.id) { $0.stage = .recognizing }
         let request = OCRRequest(
             image: item.image,
-            maxTokens: item.maxTokens,
-            maxPixels: item.maxPixels
+            maxTokens: OCRInputSettings.maxTokens(percent: ocrInputPercent),
+            maxPixels: ocrPixelBudget
         )
         do {
             let result: OCRResult
@@ -427,6 +561,7 @@ final class AppModel {
             updateCapture(item.id) { capture in
                 capture.ocrText = result.text
                 capture.translatedText = ""
+                capture.translatedTarget = nil
                 capture.stage = .ocrReady
             }
         } catch {
@@ -441,10 +576,10 @@ final class AppModel {
             return
         }
         updateCapture(item.id) { $0.stage = .translating }
-        let chineseSource = LanguageGuess.detect(text) == .chinese
         let request = TranslateRequest(
             text: text,
-            chineseSource: chineseSource,
+            sourceLanguage: .auto,
+            targetLanguage: targetLanguage,
             maxTokens: min(4096, max(384, text.count * 2))
         )
         do {
@@ -454,8 +589,10 @@ final class AppModel {
             } else {
                 result = try await translator.translate(request)
             }
+            let target = targetLanguage
             updateCapture(item.id) { capture in
                 capture.translatedText = result.text
+                capture.translatedTarget = target
                 capture.stage = .translated
             }
         } catch {

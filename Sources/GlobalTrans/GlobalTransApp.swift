@@ -14,11 +14,16 @@ struct GlobalTransApp: App {
                 await AppModel.shared.captureRegion()
             }
         }
+        DispatchQueue.main.async {
+            StatusItemContextMenu.install()
+        }
     }
 
     var body: some Scene {
-        MenuBarExtra("GlobalTrans", systemImage: "doc.text.viewfinder") {
+        MenuBarExtra {
             StatusPanel(model: model)
+        } label: {
+            MenuBarStatusLabel()
         }
         .menuBarExtraStyle(.window)
 
@@ -26,6 +31,22 @@ struct GlobalTransApp: App {
             ModelsSettingsView(model: AppModel.shared)
         }
         .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
+
+        WindowGroup("Preview", id: "preview", for: PreviewWindowID.self) { $kind in
+            ResultPreviewWindow(kind: kind, model: AppModel.shared)
+        } defaultValue: {
+            .ocr
+        }
+        .windowResizability(.automatic)
+        .defaultSize(width: 760, height: 640)
+        .defaultLaunchBehavior(.suppressed)
+
+        Window("Merge OCR", id: "ocr-merge") {
+            OCRMergeWindow(model: AppModel.shared)
+        }
+        .windowResizability(.automatic)
+        .defaultSize(width: 900, height: 640)
         .defaultLaunchBehavior(.suppressed)
     }
 }

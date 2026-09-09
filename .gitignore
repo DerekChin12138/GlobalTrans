@@ -1,3 +1,4 @@
+dist/
 .venv/
 .python-version
 __pycache__/

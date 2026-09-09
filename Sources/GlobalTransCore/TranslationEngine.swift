@@ -104,16 +104,42 @@ enum HunyuanChat {
 }
 
 public enum TranslatePrompt {
+    /// Hy-MT2 official default template specifies `{target_lang}` with a full language name.
+    /// Chinese prompts use Chinese names; English prompts use English names.
+    /// When the user picks an explicit source language, that name is included as well.
     public static func text(for request: TranslateRequest) -> String {
-        if request.chineseSource {
+        let resolved = TranslateLanguage.resolve(
+            source: request.sourceLanguage,
+            target: request.targetLanguage,
+            text: request.text
+        )
+        let chinesePrompt = resolved.source.isChinese
+        let targetName = resolved.target.officialName(chinesePrompt: chinesePrompt)
+        if chinesePrompt {
+            if resolved.sourceExplicit {
+                let sourceName = resolved.source.officialName(chinesePrompt: true)
+                return """
+                    将以下\(sourceName)文本翻译为\(targetName)，注意只需要输出翻译后的结果，不要额外解释：
+
+                    \(request.text)
+                    """
+            }
             return """
-                Translate the following text into English. Note that you should only output the translated result without any additional explanation:
+                将以下文本翻译为\(targetName)，注意只需要输出翻译后的结果，不要额外解释：
+
+                \(request.text)
+                """
+        }
+        if resolved.sourceExplicit {
+            let sourceName = resolved.source.officialName(chinesePrompt: false)
+            return """
+                Translate the following \(sourceName) text into \(targetName). Note that you should only output the translated result without any additional explanation:
 
                 \(request.text)
                 """
         }
         return """
-            将以下文本翻译为简体中文，注意只需要输出翻译后的结果，不要额外解释：
+            Translate the following text into \(targetName). Note that you should only output the translated result without any additional explanation:
 
             \(request.text)
             """
