@@ -64,6 +64,7 @@ enum MarkdownPreviewText {
 
     static func prepared(_ raw: String) -> String {
         var text = stripPlaceholderImages(raw)
+        text = repairJammedHTMLTags(text)
         text = convertHTMLTables(text)
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -226,6 +227,33 @@ enum MarkdownPreviewText {
         return result
     }
 
+    /// OvisOCR2-4bit often drops `>` between adjacent tags (`</td><td>` → `</td<td>`).
+    private static func repairJammedHTMLTags(_ text: String) -> String {
+        guard text.localizedCaseInsensitiveContains("<table") else { return text }
+        let pattern = #"</?(?:table|thead|tbody|tfoot|tr|td|th|caption)(?:\s[^<>]*?)?(?=<)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return text
+        }
+        var current = text
+        for _ in 0..<8 {
+            let ns = current as NSString
+            let matches = regex.matches(in: current, range: NSRange(location: 0, length: ns.length))
+            if matches.isEmpty { break }
+            var next = current
+            for match in matches.reversed() {
+                var tag = ns.substring(with: match.range)
+                if tag.filter({ $0 == "\"" }).count % 2 == 1 {
+                    tag += "\""
+                }
+                tag += ">"
+                next = (next as NSString).replacingCharacters(in: match.range, with: tag)
+            }
+            if next == current { break }
+            current = next
+        }
+        return current
+    }
+
     private static func convertHTMLTables(_ markdown: String) -> String {
         guard let regex = try? NSRegularExpression(
             pattern: #"<table\b[\s\S]*?</table>"#,
@@ -262,8 +290,12 @@ enum MarkdownPreviewText {
             }
         }
         guard let header = rows.first, !header.isEmpty else { return nil }
-        let width = header.count
-        let padded = rows.map { row -> [String] in
+        var normalized = rows
+        let width = max(header.count, rows.map(\.count).max() ?? 0)
+        if header.count == width - 1, rows.dropFirst().contains(where: { $0.count == width }) {
+            normalized[0] = [""] + header
+        }
+        let padded = normalized.map { row -> [String] in
             if row.count >= width { return Array(row.prefix(width)) }
             return row + Array(repeating: "", count: width - row.count)
         }
@@ -292,6 +324,9 @@ enum MarkdownPreviewText {
 
     private static func cleanupCell(_ raw: String) -> String {
         var text = raw
+        text = text.replacingOccurrences(of: "$$", with: "$")
+        text = text.replacingOccurrences(of: "$true", with: "$ true")
+        text = text.replacingOccurrences(of: "$false", with: "$ false")
         text = text.replacingOccurrences(of: #"<br\s*/?>"#, with: " ", options: .regularExpression)
         if let tagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#, options: []) {
             let range = NSRange(text.startIndex..., in: text)
