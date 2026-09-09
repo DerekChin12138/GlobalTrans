@@ -1,23 +1,10 @@
 import AppKit
-import GlobalTransCore
 import SwiftUI
 
 @main
 struct GlobalTransApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel.shared
-
-    init() {
-        MLXRuntime.configure()
-        NSApplication.shared.setActivationPolicy(.accessory)
-        HotKey.register {
-            Task { @MainActor in
-                await AppModel.shared.captureRegion()
-            }
-        }
-        DispatchQueue.main.async {
-            StatusItemContextMenu.install()
-        }
-    }
 
     var body: some Scene {
         MenuBarExtra {

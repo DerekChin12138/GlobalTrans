@@ -41,7 +41,7 @@ struct MathView: NSViewRepresentable {
     }
 
     private func apply(to view: MTMathUILabel) {
-        view.latex = equation
+        view.latex = MathLatex.sanitized(equation)
         view.font = MTFontManager().latinModernFont(withSize: fontSize)
         view.textAlignment = textAlignment
         view.labelMode = labelMode
@@ -65,7 +65,7 @@ enum MathImageRenderer {
         label.wantsLayer = true
         label.layer?.isGeometryFlipped = true
         label.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        label.latex = latex
+        label.latex = MathLatex.sanitized(latex)
         label.font = MTFontManager().latinModernFont(withSize: fontSize)
         label.labelMode = .text
         label.textAlignment = .left
