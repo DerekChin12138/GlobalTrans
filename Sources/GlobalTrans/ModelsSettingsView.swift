@@ -96,6 +96,7 @@ struct ModelsSettingsView: View {
         .padding(20)
         .frame(width: 540)
         .disabled(busy)
+        .background(FrontmostWindow())
         .onAppear(perform: reloadLocalPaths)
         .onChange(of: model.localModelRevision) {
             reloadLocalPaths()

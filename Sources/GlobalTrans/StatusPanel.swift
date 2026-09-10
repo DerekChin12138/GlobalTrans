@@ -50,32 +50,26 @@ struct StatusPanel: View {
             }
             .controlSize(.small)
 
-            HStack(spacing: 8) {
-                if model.pendingOCRCount > 1 {
-                    Button("OCR All (\(model.pendingOCRCount))") {
-                        Task { await model.runOCR(onlySelected: false) }
+            if model.pendingOCRCount > 1 || model.pendingTranslateCount > 1 {
+                HStack(spacing: 8) {
+                    if model.pendingOCRCount > 1 {
+                        Button("OCR All (\(model.pendingOCRCount))") {
+                            Task { await model.runOCR(onlySelected: false) }
+                        }
+                        .disabled(!model.canRunAllOCR)
                     }
-                    .disabled(!model.canRunAllOCR)
-                }
 
-                if model.pendingTranslateCount > 1 {
-                    Button("Translate All (\(model.pendingTranslateCount))") {
-                        Task { await model.runTranslate(onlySelected: false) }
+                    if model.pendingTranslateCount > 1 {
+                        Button("Translate All (\(model.pendingTranslateCount))") {
+                            Task { await model.runTranslate(onlySelected: false) }
+                        }
+                        .disabled(!model.canRunAllTranslate)
                     }
-                    .disabled(!model.canRunAllTranslate)
-                }
 
-                Button("Merge…") {
-                    model.prepareMergeWorkspace()
-                    openWindow(id: "ocr-merge")
-                    NSApp.activate(ignoringOtherApps: true)
+                    Spacer()
                 }
-                .disabled(!model.canOpenMerge)
-                .help("Combine OCR texts in a new window")
-
-                Spacer()
+                .controlSize(.small)
             }
-            .controlSize(.small)
 
             CaptureStrip(model: model)
 
@@ -124,15 +118,9 @@ struct StatusPanel: View {
                     copy: model.copyOriginal,
                     popOut: { openPreview(.ocr) },
                     compact: true,
-                    documentID: model.selectedCapture?.id,
+                    documentID: model.editorDocumentID,
                     editText: model.editableOCRText,
-                    onEdit: model.canEditOCR
-                        ? { text in
-                            if let id = model.selectedCapture?.id {
-                                model.setOCRText(text, for: id)
-                            }
-                        }
-                        : nil,
+                    onEdit: model.canEditOCR ? { model.setOCRText($0) } : nil,
                     actionTitle: "OCR",
                     actionEnabled: model.canRunOCR,
                     actionHelp: "OCR the selected screenshot",
@@ -145,16 +133,35 @@ struct StatusPanel: View {
                     text: model.translatedText,
                     copy: model.copyTranslation,
                     popOut: { openPreview(.translation) },
-                    documentID: model.selectedCapture?.id,
+                    documentID: model.editorDocumentID,
                     actionTitle: "Translate",
                     actionEnabled: model.canRunTranslate,
-                    actionHelp: "Translate the selected screenshot",
+                    actionHelp: "Translate the OCR box text, typed or recognized",
                     action: {
                         Task { await model.runTranslate(onlySelected: true) }
                     }
                 )
             }
             .layoutPriority(1)
+
+            Button {
+                model.prepareMergeWorkspace()
+                openWindow(id: "ocr-merge")
+                NSApp.activate(ignoringOtherApps: true)
+            } label: {
+                Text("Merge some contexts")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+            }
+            .buttonStyle(.plain)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(.separator, lineWidth: 1)
+            )
+            .disabled(!model.canOpenMerge)
+            .help("Combine texts from cached screenshots in a new window")
 
             if case .failed = model.phase {
                 Button("Open Screen Recording Settings") {
@@ -170,11 +177,12 @@ struct StatusPanel: View {
                 Spacer()
                 Button("Models…") {
                     openWindow(id: "models")
+                    NSApp.activate(ignoringOtherApps: true)
                 }
                 .controlSize(.small)
             }
 
-            Text("Hotkey: ⌥⌘O caches a screenshot · OCR and Translate are manual")
+            Text("Hotkey: ⌥⌘O caches a screenshot · or type in the OCR box to translate")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(model.memoryLabel)
@@ -183,7 +191,7 @@ struct StatusPanel: View {
                 .help("phys_footprint · IOSurface/external · MLX active+cache")
         }
         .padding(14)
-        .frame(width: 420, height: 718)
+        .frame(width: 420, height: 748)
         .background(StatusPanelWindowMarker())
         .onAppear {
             StatusItemContextMenu.install()
@@ -243,16 +251,29 @@ private struct CaptureStrip: View {
                     CaptureThumb(
                         thumbnail: item.thumbnailImage,
                         index: index + 1,
-                        badge: item.stage.badge,
+                        badge: item.displayBadge,
                         selected: item.id == model.selectedID,
                         onSelect: { model.selectCapture(item.id) },
                         onRemove: { model.removeCapture(item.id) }
                     )
                 }
                 ForEach(0..<emptySlotCount, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(.quaternary, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    Button {
+                        model.beginTextDraft()
+                    } label: {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(.quaternary, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            Image(systemName: "plus")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
                         .frame(width: 64, height: 52)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isBusy)
+                    .help("New text · click to type and translate")
                 }
             }
         }
@@ -323,23 +344,18 @@ private struct CaptureThumb: View {
 }
 
 private struct StatusPanelWindowMarker: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            configure(view.window)
-        }
-        return view
+    func makeNSView(context: Context) -> MarkerView {
+        MarkerView()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            configure(nsView.window)
-        }
-    }
+    func updateNSView(_ nsView: MarkerView, context: Context) {}
 
-    private func configure(_ window: NSWindow?) {
-        guard let window else { return }
-        window.identifier = NSUserInterfaceItemIdentifier(StatusPanelHider.panelWindowID)
-        window.styleMask.remove(.resizable)
+    final class MarkerView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.identifier = NSUserInterfaceItemIdentifier(StatusPanelHider.panelWindowID)
+            window.styleMask.remove(.resizable)
+        }
     }
 }

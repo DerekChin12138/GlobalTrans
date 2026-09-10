@@ -98,6 +98,7 @@ final class AppModel {
     private var unloadTask: Task<Void, Never>?
     private var jobIndex = 0
     private var jobTotal = 0
+    private let textDraftID = UUID()
 
     private static let hidePanelOnCaptureKey = "GTHidePanelOnCapture"
     private static let targetLanguageKey = "GTTranslateTargetLang"
@@ -129,7 +130,11 @@ final class AppModel {
 
     var originalText: String {
         guard let item = selectedCapture else { return "" }
-        if case .ocrFailed(let message) = item.stage { return message }
+        if case .ocrFailed(let message) = item.stage,
+           item.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return message
+        }
         return item.ocrText
     }
 
@@ -139,7 +144,9 @@ final class AppModel {
         return item.translatedText
     }
 
-    var pendingOCRCount: Int { captures.filter { $0.stage.needsOCR }.count }
+    var pendingOCRCount: Int {
+        captures.filter { $0.stage.needsOCR && $0.jpegURL != nil }.count
+    }
     var pendingTranslateCount: Int { captures.filter { $0.needsTranslate(to: targetLanguage) }.count }
     var cacheIsFull: Bool { captures.count >= CaptureItem.cacheLimit }
 
@@ -151,14 +158,18 @@ final class AppModel {
     }
 
     var canAddCapture: Bool { !cacheIsFull && phase != .selecting }
-    var canRunOCR: Bool { selectedCapture?.stage.needsOCR == true && !isBusy }
-    var canRunTranslate: Bool { selectedCapture?.needsTranslate(to: targetLanguage) == true && !isBusy }
+    var canRunOCR: Bool {
+        guard !isBusy, let item = selectedCapture else { return false }
+        return item.jpegURL != nil
+    }
+    var canRunTranslate: Bool {
+        selectedCapture?.needsTranslate(to: targetLanguage) == true && !isBusy
+    }
     var canRunAllOCR: Bool { pendingOCRCount > 1 && !isBusy }
     var canRunAllTranslate: Bool { pendingTranslateCount > 1 && !isBusy }
-    var canEditOCR: Bool { selectedCapture != nil && !isBusy }
-    var canOpenMerge: Bool {
-        !isBusy && captures.contains { !$0.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    }
+    var canEditOCR: Bool { !isBusy }
+    var canOpenMerge: Bool { !isBusy && !captures.isEmpty }
+    var editorDocumentID: UUID { selectedCapture?.id ?? textDraftID }
     var editableOCRText: String { selectedCapture?.ocrText ?? "" }
     var ocrPixelBudget: Int { OCRInputSettings.pixels(percent: ocrInputPercent) }
 
@@ -198,6 +209,16 @@ final class AppModel {
 
     func selectCapture(_ id: UUID) {
         selectedID = id
+    }
+
+    func beginTextDraft() {
+        guard !isBusy else { return }
+        if let existing = captures.first(where: { $0.kind == .text && $0.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            selectedID = existing.id
+            return
+        }
+        guard canAddCapture else { return }
+        enqueue(CaptureItem.makeText())
     }
 
     func removeCapture(_ id: UUID) {
@@ -277,7 +298,7 @@ final class AppModel {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.png, .jpeg, .heic, .tiff, .pdf, .image]
         panel.message = "Choose an image or PDF to OCR"
-        panel.level = .modalPanel
+        ChildWindow.focus(panel)
         let response = panel.runModal()
         let pickedURL = panel.url
         panel.close()
@@ -292,10 +313,10 @@ final class AppModel {
         guard onlySelected ? canRunOCR : (pendingOCRCount > 0 && !isBusy) else { return }
         cancelUnload()
         let jobIDs: [UUID]
-        if onlySelected, let item = selectedCapture, item.stage.needsOCR {
+        if onlySelected, let item = selectedCapture, item.jpegURL != nil {
             jobIDs = [item.id]
         } else {
-            jobIDs = captures.filter { $0.stage.needsOCR }.map(\.id)
+            jobIDs = captures.filter { $0.stage.needsOCR && $0.jpegURL != nil }.map(\.id)
         }
         guard !jobIDs.isEmpty else { return }
         jobTotal = jobIDs.count
@@ -358,9 +379,10 @@ final class AppModel {
         NSPasteboard.general.setString(translatedText, forType: .string)
     }
 
-    func setOCRText(_ text: String, for id: UUID) {
+    func setOCRText(_ text: String, for id: UUID? = nil) {
         guard !isBusy else { return }
-        updateCapture(id) { capture in
+        let target = resolveEditableCaptureID(id, initialText: text)
+        updateCapture(target) { capture in
             guard capture.ocrText != text else { return }
             capture.ocrText = text
             capture.translatedText = ""
@@ -373,6 +395,29 @@ final class AppModel {
                 capture.stage = .ocrReady
             }
         }
+    }
+
+    private func resolveEditableCaptureID(_ id: UUID?, initialText: String) -> UUID {
+        if let id, captures.contains(where: { $0.id == id }) {
+            return id
+        }
+        if let selected = selectedCapture {
+            return selected.id
+        }
+        if !captures.contains(where: { $0.id == textDraftID }),
+           captures.count < CaptureItem.cacheLimit
+        {
+            var item = CaptureItem.makeText(id: textDraftID)
+            item.ocrText = initialText
+            if !initialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                item.stage = .ocrReady
+            }
+            captures.append(item)
+            selectedID = textDraftID
+            if phase == .idle { phase = .ready }
+            return textDraftID
+        }
+        return selectedCapture?.id ?? textDraftID
     }
 
     func prepareMergeWorkspace() {
@@ -641,7 +686,7 @@ final class AppModel {
     private func translateItem(_ id: UUID) async {
         let text = captures.first(where: { $0.id == id })?.ocrText ?? ""
         guard !text.isEmpty else {
-            updateCapture(id) { $0.stage = .translateFailed("No OCR text to translate.") }
+            updateCapture(id) { $0.stage = .translateFailed("Nothing to translate. Type in the OCR box or run OCR first.") }
             return
         }
         updateCapture(id) { $0.stage = .translating }
@@ -680,6 +725,7 @@ final class AppModel {
         panel.allowsMultipleSelection = false
         panel.message = message
         panel.directoryURL = start
+        ChildWindow.focus(panel)
         guard panel.runModal() == .OK, let url = panel.url else { return "" }
         return apply(url)
     }

@@ -9,7 +9,7 @@ enum StatusPanelHider {
         hidden = NSApp.windows.filter { window in
             window.isVisible
                 && window.level != .screenSaver
-                && window.identifier?.rawValue == panelWindowID
+                && StatusItemContextMenu.isPanelWindow(window)
         }
         if hidden.isEmpty {
             hidden = NSApp.windows.filter { window in

@@ -5,6 +5,7 @@ import GlobalTransCore
 enum CaptureKind: Equatable {
     case screen
     case file
+    case text
 }
 
 enum CaptureStage: Equatable {
@@ -19,13 +20,6 @@ enum CaptureStage: Equatable {
     var needsOCR: Bool {
         switch self {
         case .queued, .ocrFailed: return true
-        default: return false
-        }
-    }
-
-    var needsTranslate: Bool {
-        switch self {
-        case .ocrReady, .translateFailed: return true
         default: return false
         }
     }
@@ -64,6 +58,11 @@ struct CaptureItem: Identifiable {
         NSImage(data: thumbPNG) ?? NSImage(size: NSSize(width: 72, height: 72))
     }
 
+    var displayBadge: String {
+        if kind == .text, case .queued = stage { return "text" }
+        return stage.badge
+    }
+
     mutating func discardPixels() {
         CaptureStore.remove(jpegURL)
         jpegURL = nil
@@ -71,17 +70,30 @@ struct CaptureItem: Identifiable {
     }
 
     func needsTranslate(to target: TranslateLanguage) -> Bool {
+        let source = ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else { return false }
         switch stage {
-        case .ocrReady, .translateFailed:
-            return true
+        case .recognizing, .translating:
+            return false
         case .translated:
             return translatedTarget != target
         default:
-            return false
+            return true
         }
     }
 
     static let cacheLimit = 5
+
+    static func makeText(id: UUID = UUID()) -> CaptureItem {
+        CaptureItem(
+            id: id,
+            createdAt: Date(),
+            kind: .text,
+            jpegURL: nil,
+            thumbPNG: textThumbnailPNG(),
+            stage: .queued
+        )
+    }
 
     static func make(cgImage: CGImage, kind: CaptureKind) -> CaptureItem {
         let encoded = ImageResizer.encodedJPEGAndThumb(cgImage)
@@ -93,5 +105,33 @@ struct CaptureItem: Identifiable {
             jpegURL: jpegURL,
             thumbPNG: encoded.thumb
         )
+    }
+
+    private static func textThumbnailPNG() -> Data {
+        let size = NSSize(width: 72, height: 52)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.windowBackgroundColor.setFill()
+            rect.fill()
+            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+            if let symbol = NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: nil)?
+                .withSymbolConfiguration(config)
+            {
+                let symbolSize = symbol.size
+                let drawn = NSRect(
+                    x: rect.midX - symbolSize.width / 2,
+                    y: rect.midY - symbolSize.height / 2,
+                    width: symbolSize.width,
+                    height: symbolSize.height
+                )
+                NSColor.secondaryLabelColor.set()
+                symbol.draw(in: drawn)
+            }
+            return true
+        }
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:])
+        else { return Data() }
+        return png
     }
 }

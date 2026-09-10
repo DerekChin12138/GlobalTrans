@@ -23,12 +23,24 @@ enum StatusItemContextMenu {
         }
     }
 
-    static func presentMainPanel() {
-        let panelVisible = NSApp.windows.contains {
-            $0.isVisible && $0.identifier?.rawValue == StatusPanelHider.panelWindowID
+    static func isPanelVisible() -> Bool {
+        NSApp.windows.contains { $0.isVisible && isPanelWindow($0) }
+    }
+
+    static func isPanelWindow(_ window: NSWindow) -> Bool {
+        if window.identifier?.rawValue == StatusPanelHider.panelWindowID {
+            return true
         }
-        guard !panelVisible, let button = findStatusBarButton() else { return }
+        return window.className.contains("MenuBarExtra")
+    }
+
+    /// Returns true if the panel is already up or a click was sent.
+    @discardableResult
+    static func presentMainPanel() -> Bool {
+        if isPanelVisible() { return true }
+        guard let button = findStatusBarButton() else { return false }
         button.performClick(nil)
+        return true
     }
 
     private static func showMenu(from button: NSStatusBarButton, event: NSEvent) {

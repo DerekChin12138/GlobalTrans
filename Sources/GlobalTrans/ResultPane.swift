@@ -79,23 +79,33 @@ struct ResultPane: View {
                     }
                     .controlSize(.mini)
                     .help("Open in new window")
-                    .disabled(text.isEmpty && editorText.isEmpty)
+                    .disabled(documentID == nil && text.isEmpty && editorText.isEmpty)
                 }
                 Button("Copy", action: copy)
                     .controlSize(.mini)
-                    .disabled(text.isEmpty)
+                    .disabled(text.isEmpty && editorText.isEmpty)
             }
             Group {
                 if isEditable, mode == .edit {
-                    TextEditor(
-                        text: Binding(
-                            get: { editorText },
-                            set: { onEdit?($0) }
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(
+                            text: Binding(
+                                get: { editorText },
+                                set: { onEdit?($0) }
+                            )
                         )
-                    )
-                    .font(.system(size: compact ? 12 : 13, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .id(documentID)
+                        .font(.system(size: compact ? 12 : 13, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .id(documentID)
+                        if editorText.isEmpty {
+                            Text("Type or paste to translate")
+                                .font(.system(size: compact ? 12 : 13, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 8)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
                 } else {
                     ScrollView {
                         Group {
@@ -125,6 +135,15 @@ struct ResultPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .id(documentID)
+        .onAppear(perform: syncMode)
+        .onChange(of: documentID) { _, _ in syncMode() }
+        .onChange(of: isEditable) { _, _ in syncMode() }
+    }
+
+    private func syncMode() {
+        if isEditable, editorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mode = .edit
+        }
     }
 }
 
@@ -138,20 +157,15 @@ struct ResultPreviewWindow: View {
             text: kind == .ocr ? model.originalText : model.translatedText,
             copy: kind == .ocr ? model.copyOriginal : model.copyTranslation,
             compact: false,
-            documentID: model.selectedCapture?.id,
+            documentID: model.editorDocumentID,
             editText: kind == .ocr ? model.editableOCRText : nil,
-            onEdit: kind == .ocr && model.canEditOCR
-                ? { text in
-                    if let id = model.selectedCapture?.id {
-                        model.setOCRText(text, for: id)
-                    }
-                }
-                : nil
+            onEdit: kind == .ocr && model.canEditOCR ? { model.setOCRText($0) } : nil
         )
         .padding(16)
         .frame(minWidth: 520, minHeight: 420)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(kind.title)
+        .background(FrontmostWindow())
     }
 }
 

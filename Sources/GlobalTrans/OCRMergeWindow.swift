@@ -23,6 +23,7 @@ struct OCRMergeWindow: View {
             .frame(minWidth: 480, minHeight: 420)
         }
         .navigationTitle("Merge OCR")
+        .background(FrontmostWindow())
         .onAppear {
             model.prepareMergeWorkspace()
         }
