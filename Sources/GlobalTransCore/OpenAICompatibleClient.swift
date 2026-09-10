@@ -14,10 +14,7 @@ public struct OpenAICompatibleClient: Sendable {
     }
 
     public func transcribe(_ request: OCRRequest) async throws -> OCRResult {
-        let jpeg = try ImageResizer.jpegData(
-            request.image.cropped(to: request.image.extent),
-            maxPixels: request.maxPixels
-        )
+        let jpeg = request.jpeg
         let model = try await resolvedModel(settings.ocrModel)
         let payload = ChatPayload(
             model: model,
@@ -114,6 +111,7 @@ public struct OpenAICompatibleClient: Sendable {
             ]
         }
         let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
 
         let data: Data
         let response: URLResponse

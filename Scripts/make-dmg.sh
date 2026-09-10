@@ -46,8 +46,9 @@ GlobalTrans $VERSION
   https://huggingface.co/mlx-community/OvisOCR2-4bit
   https://huggingface.co/mlx-community/Hy-MT2-1.8B-4bit
 
-应用不会在 Documents / Application Support / Caches 里写工作文件。
-截图只留在内存。模型由你自己管理。
+截图 JPEG 会写到 ~/Library/Caches/app.globaltrans.ocr/shots/，启动时清空。
+识别结果只留在内存。模型由你自己管理。
+几次 OCR / 翻译后 RAM 大约稳定在 400MB+，不再随次数线性上涨。
 EOF
 
 hdiutil create \

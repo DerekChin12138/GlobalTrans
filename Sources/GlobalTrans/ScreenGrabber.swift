@@ -18,6 +18,16 @@ enum ScreenGrabError: LocalizedError {
 }
 
 enum ScreenGrabber {
+    static func captureItem(rectInScreen: CGRect) async throws -> CaptureItem {
+        var surface: CGImage? = try await capture(rectInScreen: rectInScreen)
+        let item = autoreleasepool { () -> CaptureItem in
+            let captured = surface!
+            surface = nil
+            return CaptureItem.make(cgImage: captured, kind: .screen)
+        }
+        return item
+    }
+
     static func capture(rectInScreen: CGRect) async throws -> CGImage {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,

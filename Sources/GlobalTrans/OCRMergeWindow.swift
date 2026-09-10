@@ -3,6 +3,7 @@ import SwiftUI
 struct OCRMergeWindow: View {
     @Bindable var model: AppModel
     @State private var draftMode: MergePaneMode = .edit
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HSplitView {
@@ -46,7 +47,7 @@ struct OCRMergeWindow: View {
             List(model.captures) { item in
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        Image(nsImage: item.thumbnail)
+                        Image(nsImage: item.thumbnailImage)
                             .resizable()
                             .scaledToFill()
                             .frame(width: 48, height: 36)
@@ -116,7 +117,12 @@ struct OCRMergeWindow: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
                     ScrollView {
-                        MixedMarkdownView(text: model.mergeDraft, compact: false)
+                        MixedMarkdownView(
+                            text: model.mergeDraft,
+                            compact: false,
+                            dark: colorScheme == .dark
+                        )
+                        .equatable()
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -148,7 +154,12 @@ struct OCRMergeWindow: View {
                         Text("—")
                             .foregroundStyle(.secondary)
                     } else {
-                        MixedMarkdownView(text: model.mergeTranslation, compact: false)
+                        MixedMarkdownView(
+                            text: model.mergeTranslation,
+                            compact: false,
+                            dark: colorScheme == .dark
+                        )
+                        .equatable()
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

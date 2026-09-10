@@ -20,6 +20,9 @@ public actor TranslationEngine {
                 from: modelDirectory,
                 using: HuggingFaceTokenizerLoader()
             )
+            await container?.perform { context in
+                eval(context.model)
+            }
         } catch {
             throw OCREngineError.worker(error.localizedDescription)
         }
@@ -29,6 +32,7 @@ public actor TranslationEngine {
         if container == nil {
             try await load()
         }
+        MLXRuntime.configure()
         guard let container else {
             throw OCREngineError.worker("The translation model is not loaded.")
         }
@@ -42,29 +46,47 @@ public actor TranslationEngine {
                 var tokenIds = context.tokenizer.encode(text: wrapped, addSpecialTokens: false)
                 tokenIds = HunyuanChat.mergeSplitNewlines(tokenIds, tokenizer: context.tokenizer)
                 let input = LMInput(tokens: MLXArray(tokenIds))
-                let stream = try generate(input: input, parameters: parameters, context: context)
+                let iterator = try TokenIterator(
+                    input: input,
+                    model: context.model,
+                    parameters: parameters
+                )
+                let (stream, task) = generateTask(
+                    promptTokenCount: input.text.tokens.size,
+                    modelConfiguration: context.configuration,
+                    tokenizer: context.tokenizer,
+                    iterator: iterator
+                )
                 var output = ""
                 for await item in stream {
                     if let chunk = item.chunk {
                         output += chunk
                     }
                 }
+                await task.value
                 return output
             }
         } catch {
+            MLXRuntime.releaseAll()
             throw OCREngineError.worker(error.localizedDescription)
         }
         let text = TranslatePrompt.cleaned(raw)
         if text.isEmpty {
             throw OCREngineError.emptyOutput
         }
-        MLXRuntime.releaseTemporaries()
+        MLXRuntime.releaseAll()
         return OCRResult(text: text, elapsed: ContinuousClock.now - started)
     }
 
-    public func unload() {
+    public func unload() async {
+        if let container {
+            await container.perform { context in
+                (context.model as? HunyuanV1DenseModel)?.releaseScratch()
+            }
+        }
         container = nil
-        Memory.clearCache()
+        await Task.yield()
+        MLXRuntime.releaseAll()
     }
 
     private static func registerArchitecture() async {

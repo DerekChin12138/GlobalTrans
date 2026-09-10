@@ -43,6 +43,7 @@ struct ResultPane: View {
     var actionHelp: String? = nil
     var action: (() -> Void)? = nil
     @State private var mode: ResultPaneMode = .preview
+    @Environment(\.colorScheme) private var colorScheme
 
     private var isEditable: Bool { onEdit != nil }
     private var modes: [ResultPaneMode] { isEditable ? [.preview, .edit] : [.preview, .raw] }
@@ -53,7 +54,9 @@ struct ResultPane: View {
             HStack {
                 if let actionTitle, let action {
                     Button(actionTitle, action: action)
-                        .controlSize(.mini)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                        .font(.body.weight(.semibold))
                         .disabled(!actionEnabled)
                         .help(actionHelp ?? actionTitle)
                 } else {
@@ -101,10 +104,15 @@ struct ResultPane: View {
                                     .foregroundStyle(.secondary)
                             } else if mode == .raw {
                                 Text(text)
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(.system(compact ? .callout : .body, design: compact ? .default : .monospaced))
                                     .textSelection(.enabled)
                             } else {
-                                MixedMarkdownView(text: text, compact: compact)
+                                MixedMarkdownView(
+                                    text: text,
+                                    compact: compact,
+                                    dark: colorScheme == .dark
+                                )
+                                .equatable()
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -147,13 +155,17 @@ struct ResultPreviewWindow: View {
     }
 }
 
-struct MixedMarkdownView: View {
+struct MixedMarkdownView: View, Equatable {
     let text: String
     var compact: Bool = true
-    @Environment(\.colorScheme) private var colorScheme
+    var dark: Bool
 
     private var bodyFontSize: CGFloat { compact ? 13 : 15 }
     private var displayFontSize: CGFloat { compact ? 16 : 18 }
+
+    static func == (lhs: MixedMarkdownView, rhs: MixedMarkdownView) -> Bool {
+        lhs.text == rhs.text && lhs.compact == rhs.compact && lhs.dark == rhs.dark
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 12 : 16) {
@@ -162,7 +174,7 @@ struct MixedMarkdownView: View {
                     MarkdownPreviewText.segments(
                         from: text,
                         fontSize: bodyFontSize,
-                        dark: colorScheme == .dark
+                        dark: dark
                     ).enumerated()
                 ),
                 id: \.offset

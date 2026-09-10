@@ -5,12 +5,12 @@ import MLXLMCommon
 import MLXVLM
 
 public struct OCRRequest: Sendable {
-    public var image: CIImage
+    public var jpeg: Data
     public var maxTokens: Int
     public var maxPixels: Int
 
-    public init(image: CIImage, maxTokens: Int = 2048, maxPixels: Int = OCRInputSettings.pixels(percent: OCRInputSettings.defaultPercent)) {
-        self.image = image
+    public init(jpeg: Data, maxTokens: Int = 2048, maxPixels: Int = OCRInputSettings.pixels(percent: OCRInputSettings.defaultPercent)) {
+        self.jpeg = jpeg
         self.maxTokens = maxTokens
         self.maxPixels = maxPixels
     }
@@ -96,45 +96,66 @@ public actor OCREngine {
         if container == nil {
             try await load()
         }
+        MLXRuntime.configure()
         guard let container else {
             throw OCREngineError.worker("The OCR model is not loaded.")
         }
 
-        let prepared = ImageResizer.capped(
-            request.image.cropped(to: request.image.extent),
-            maxPixels: request.maxPixels
-        )
-
         let started = ContinuousClock.now
-        let session = ChatSession(
-            container,
-            generateParameters: GenerateParameters(
-                maxTokens: request.maxTokens,
-                temperature: 0
-            ),
-            processing: UserInput.Processing(resize: nil, maxPixels: request.maxPixels),
-            additionalContext: ["enable_thinking": false]
+        let parameters = GenerateParameters(
+            maxTokens: request.maxTokens,
+            temperature: 0
         )
         let raw: String
         do {
-            raw = try await session.respond(
-                to: OCRPrompt.text,
-                image: .ciImage(prepared)
-            )
+            // Single-shot generate so the KV cache dies with the stream.
+            // Await the generation task before returning so Metal buffers can be cleared.
+            raw = try await container.perform(values: request.jpeg) { context, jpeg in
+                guard let prepared = ImageResizer.ciImage(fromJPEG: jpeg, maxPixels: request.maxPixels) else {
+                    throw OCREngineError.worker("Could not decode the screenshot.")
+                }
+                let userInput = UserInput(
+                    chat: [.user(OCRPrompt.text, images: [.ciImage(prepared)])],
+                    processing: UserInput.Processing(resize: nil, maxPixels: request.maxPixels),
+                    additionalContext: ["enable_thinking": false]
+                )
+                let input = try await context.processor.prepare(input: userInput)
+                let iterator = try TokenIterator(
+                    input: input,
+                    model: context.model,
+                    parameters: parameters
+                )
+                let (stream, task) = generateTask(
+                    promptTokenCount: input.text.tokens.size,
+                    modelConfiguration: context.configuration,
+                    tokenizer: context.tokenizer,
+                    iterator: iterator
+                )
+                var output = ""
+                for await item in stream {
+                    if let chunk = item.chunk {
+                        output += chunk
+                    }
+                }
+                await task.value
+                return output
+            }
         } catch {
+            MLXRuntime.releaseAll()
             throw OCREngineError.worker(error.localizedDescription)
         }
         let text = OCREngine.stripThinking(raw)
         if text.isEmpty {
             throw OCREngineError.emptyOutput
         }
-        MLXRuntime.releaseTemporaries()
+        MLXRuntime.releaseAll()
         return OCRResult(text: text, elapsed: ContinuousClock.now - started)
     }
 
-    public func unload() {
+    public func unload() async {
         container = nil
-        Memory.clearCache()
+        await Task.yield()
+        MLXRuntime.releaseAll()
     }
 
     nonisolated public static func stripThinking(_ text: String) -> String {

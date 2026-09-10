@@ -7,50 +7,94 @@ final class RegionOverlayController {
     private var continuation: CheckedContinuation<CGRect?, Never>?
 
     func selectRegion() async -> CGRect? {
-        await withCheckedContinuation { continuation in
+        let rect = await withCheckedContinuation { continuation in
             self.continuation = continuation
             present()
         }
+        // Never close() or nil the contentView. That SIGSEGVs when AppKit
+        // drains the mouse-up autorelease pool. Shrink and orderOut instead.
+        await hideWindows()
+        return rect
     }
 
     private func present() {
-        cancelWindows()
-        for screen in NSScreen.screens {
-            let window = NSWindow(
-                contentRect: screen.frame,
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false
-            )
-            window.setFrame(screen.frame, display: true)
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.level = .screenSaver
-            window.ignoresMouseEvents = false
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.contentView = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size)) { [weak self] rect in
-                self?.finish(rect)
-            } onCancel: { [weak self] in
-                self?.finish(nil)
+        let screens = NSScreen.screens
+        while windows.count < screens.count {
+            windows.append(makeWindow())
+        }
+        for (index, screen) in screens.enumerated() {
+            let window = windows[index]
+            if let view = window.contentView as? SelectionView {
+                view.reset()
+                view.frame = NSRect(origin: .zero, size: screen.frame.size)
             }
+            window.backgroundColor = NSColor.black.withAlphaComponent(0.18)
+            window.setFrame(screen.frame, display: false)
+            window.ignoresMouseEvents = false
             window.makeKeyAndOrderFront(nil)
-            windows.append(window)
         }
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func finish(_ rect: CGRect?) {
-        cancelWindows()
+        for window in windows {
+            window.orderOut(nil)
+            window.ignoresMouseEvents = true
+        }
         continuation?.resume(returning: rect)
         continuation = nil
     }
 
-    private func cancelWindows() {
-        for window in windows {
-            window.orderOut(nil)
+    private func hideWindows() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                for window in self.windows {
+                    window.orderOut(nil)
+                    window.ignoresMouseEvents = true
+                    window.backgroundColor = .clear
+                    if let view = window.contentView as? SelectionView {
+                        view.reset()
+                        view.layer?.contents = nil
+                        view.layer?.backgroundColor = nil
+                        view.wantsLayer = false
+                        view.frame = NSRect(origin: .zero, size: Self.parkedFrame.size)
+                    }
+                    window.setFrame(Self.parkedFrame, display: false)
+                }
+                continuation.resume()
+            }
         }
-        windows.removeAll()
     }
+
+    private func makeWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 2, height: 2),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: true
+        )
+        window.identifier = NSUserInterfaceItemIdentifier("GTRegionOverlay")
+        window.title = "GTRegionOverlay"
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.isRestorable = false
+        window.level = .screenSaver
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.contentView = SelectionView(frame: .zero) { [weak self] rect in
+            self?.finish(rect)
+        } onCancel: { [weak self] in
+            self?.finish(nil)
+        }
+        return window
+    }
+
+    private static let parkedFrame = NSRect(x: -64, y: -64, width: 2, height: 2)
 }
 
 private final class SelectionView: NSView {
@@ -63,15 +107,21 @@ private final class SelectionView: NSView {
         self.onComplete = onComplete
         self.onCancel = onCancel
         super.init(frame: frame)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.18).cgColor
+        wantsLayer = false
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    func reset() {
+        start = nil
+        current = nil
+        needsDisplay = true
+    }
+
     override var acceptsFirstResponder: Bool { true }
+    override var isOpaque: Bool { false }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
@@ -111,9 +161,6 @@ private final class SelectionView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        NSColor.black.withAlphaComponent(0.18).setFill()
-        dirtyRect.fill()
         guard let start, let current else { return }
         let rect = NSRect(
             x: min(start.x, current.x),
@@ -121,8 +168,6 @@ private final class SelectionView: NSView {
             width: abs(current.x - start.x),
             height: abs(current.y - start.y)
         )
-        NSColor.white.withAlphaComponent(0.12).setFill()
-        rect.fill()
         NSColor.systemTeal.setStroke()
         let path = NSBezierPath(rect: rect)
         path.lineWidth = 2

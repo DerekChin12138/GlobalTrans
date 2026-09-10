@@ -1,4 +1,3 @@
-import CoreImage
 import Foundation
 import GlobalTransCore
 
@@ -29,11 +28,9 @@ struct GTOCRCLI {
             exit(2)
         }
         let url = URL(filePath: path)
-        guard let image = loadCIImage(url) else {
-            throw CLIError.unreadableImage(url)
-        }
+        let jpeg = try Data(contentsOf: url)
         let engine = OCREngine()
-        let result = try await engine.transcribe(OCRRequest(image: image))
+        let result = try await engine.transcribe(OCRRequest(jpeg: jpeg))
         print(result.text)
         print(
             "\n---\nelapsed \(format(result.elapsed))",
@@ -52,24 +49,9 @@ struct GTOCRCLI {
         await engine.unload()
     }
 
-    static func loadCIImage(_ url: URL) -> CIImage? {
-        CIImage(contentsOf: url)
-    }
-
     static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18
         return String(format: "%.2fs", seconds)
-    }
-}
-
-enum CLIError: LocalizedError {
-    case unreadableImage(URL)
-
-    var errorDescription: String? {
-        switch self {
-        case .unreadableImage(let url):
-            return "Could not read image at \(url.path)"
-        }
     }
 }

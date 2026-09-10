@@ -1,8 +1,9 @@
 import AppKit
-import CoreImage
 import Foundation
 import GlobalTransCore
 import Observation
+import os
+import UniformTypeIdentifiers
 
 enum AppPhase: Equatable {
     case idle
@@ -101,6 +102,7 @@ final class AppModel {
     private static let hidePanelOnCaptureKey = "GTHidePanelOnCapture"
     private static let targetLanguageKey = "GTTranslateTargetLang"
     private static let ocrInputPercentKey = "GTOcrInputPercent"
+    private static let memoryLog = Logger(subsystem: "app.globaltrans.ocr", category: "memory")
 
     private init() {
         if UserDefaults.standard.object(forKey: Self.hidePanelOnCaptureKey) != nil {
@@ -115,6 +117,7 @@ final class AppModel {
                 UserDefaults.standard.double(forKey: Self.ocrInputPercentKey)
             )
         }
+        CaptureStore.reset()
     }
 
     var selectedCapture: CaptureItem? {
@@ -161,6 +164,7 @@ final class AppModel {
 
     var mergeDraft = ""
     var mergeTranslation = ""
+    var memoryLabel = MLXRuntime.probe().description
 
     var statusLabel: String {
         switch phase {
@@ -197,12 +201,21 @@ final class AppModel {
     }
 
     func removeCapture(_ id: UUID) {
-        captures.removeAll { $0.id == id }
+        if let index = captures.firstIndex(where: { $0.id == id }) {
+            captures[index].discardPixels()
+            captures.remove(at: index)
+        }
         if selectedID == id {
             selectedID = captures.last?.id
         }
         if !isBusy {
             phase = captures.isEmpty ? .idle : .ready
+        }
+        purgeDiscardedMedia()
+        if captures.isEmpty, !isBusy {
+            Task { await unloadNow() }
+        } else {
+            refreshMemory()
         }
     }
 
@@ -221,12 +234,13 @@ final class AppModel {
         guard let rect = await overlay.selectRegion() else {
             if hidePanel { StatusPanelHider.restore() }
             phase = captures.isEmpty ? .idle : .ready
+            refreshMemory()
             return
         }
         do {
-            let cgImage = try await ScreenGrabber.capture(rectInScreen: rect)
+            let item = try await ScreenGrabber.captureItem(rectInScreen: rect)
             if hidePanel { StatusPanelHider.restore() }
-            enqueue(CIImage(cgImage: cgImage), kind: .screen)
+            enqueue(item)
         } catch {
             if hidePanel { StatusPanelHider.restore() }
             phase = .failed(error.localizedDescription)
@@ -245,66 +259,92 @@ final class AppModel {
             defer {
                 if accessing { url.stopAccessingSecurityScopedResource() }
             }
-            let image = try DocumentImporter.loadCIImage(from: url)
-            enqueue(image, kind: .file)
+            let item = try autoreleasepool {
+                try DocumentImporter.makeCaptureItem(from: url)
+            }
+            enqueue(item)
         } catch {
             phase = .failed(error.localizedDescription)
         }
     }
 
+    func importFromOpenPanel() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.setActivationPolicy(.regular)
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .tiff, .pdf, .image]
+        panel.message = "Choose an image or PDF to OCR"
+        panel.level = .modalPanel
+        let response = panel.runModal()
+        let pickedURL = panel.url
+        panel.close()
+        panel.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+        StatusItemContextMenu.presentMainPanel()
+        guard response == .OK, let url = pickedURL else { return }
+        Task { await importFile(url: url) }
+    }
+
     func runOCR(onlySelected: Bool = true) async {
         guard onlySelected ? canRunOCR : (pendingOCRCount > 0 && !isBusy) else { return }
         cancelUnload()
-        let jobs: [CaptureItem]
+        let jobIDs: [UUID]
         if onlySelected, let item = selectedCapture, item.stage.needsOCR {
-            jobs = [item]
+            jobIDs = [item.id]
         } else {
-            jobs = captures.filter { $0.stage.needsOCR }
+            jobIDs = captures.filter { $0.stage.needsOCR }.map(\.id)
         }
-        guard !jobs.isEmpty else { return }
-        jobTotal = jobs.count
+        guard !jobIDs.isEmpty else { return }
+        jobTotal = jobIDs.count
         jobIndex = 0
         do {
             try await prepareOCR()
-            for job in jobs {
+            for id in jobIDs {
                 jobIndex += 1
-                guard captures.contains(where: { $0.id == job.id }) else { continue }
-                await ocrItem(job)
+                guard captures.contains(where: { $0.id == id }) else { continue }
+                await ocrItem(id)
             }
             await refreshLoadedFlag()
             phase = .ready
             if modelLoaded { scheduleUnload() }
+            refreshMemory()
         } catch {
             phase = .failed(error.localizedDescription)
+            refreshMemory()
         }
     }
 
     func runTranslate(onlySelected: Bool = true) async {
         guard onlySelected ? canRunTranslate : (pendingTranslateCount > 0 && !isBusy) else { return }
         cancelUnload()
-        let jobs: [CaptureItem]
+        let jobIDs: [UUID]
         if onlySelected, let item = selectedCapture, item.needsTranslate(to: targetLanguage) {
-            jobs = [item]
+            jobIDs = [item.id]
         } else {
-            jobs = captures.filter { $0.needsTranslate(to: targetLanguage) }
+            jobIDs = captures.filter { $0.needsTranslate(to: targetLanguage) }.map(\.id)
         }
-        guard !jobs.isEmpty else { return }
-        jobTotal = jobs.count
+        guard !jobIDs.isEmpty else { return }
+        jobTotal = jobIDs.count
         jobIndex = 0
         do {
             try await prepareTranslate()
-            for job in jobs {
+            for id in jobIDs {
                 jobIndex += 1
-                guard captures.contains(where: { $0.id == job.id }) else { continue }
-                await translateItem(job)
+                guard captures.contains(where: { $0.id == id }) else { continue }
+                await translateItem(id)
             }
             await translator.unload()
             await refreshLoadedFlag()
             phase = .ready
+            refreshMemory()
         } catch {
             await translator.unload()
             await refreshLoadedFlag()
             phase = .failed(error.localizedDescription)
+            refreshMemory()
         }
     }
 
@@ -390,11 +430,13 @@ final class AppModel {
             await translator.unload()
             await refreshLoadedFlag()
             phase = captures.isEmpty ? .idle : .ready
+            refreshMemory()
         } catch {
             mergeTranslation = error.localizedDescription
             await translator.unload()
             await refreshLoadedFlag()
             phase = captures.isEmpty ? .idle : .ready
+            refreshMemory()
         }
     }
 
@@ -483,6 +525,7 @@ final class AppModel {
         if phase == .ready || phase == .idle {
             phase = captures.isEmpty ? .idle : .ready
         }
+        refreshMemory()
     }
 
     private func refreshLoadedFlag() async {
@@ -491,15 +534,32 @@ final class AppModel {
         modelLoaded = ocrLoaded || mtLoaded
     }
 
-    private func enqueue(_ image: CIImage, kind: CaptureKind) {
+    private func enqueue(_ item: CaptureItem) {
         guard captures.count < CaptureItem.cacheLimit else {
             phase = .failed("Screenshot cache is full (\(CaptureItem.cacheLimit)). Remove one first.")
             return
         }
-        let item = CaptureItem.make(image: image, kind: kind)
         captures.append(item)
         selectedID = item.id
         phase = .ready
+        refreshMemory()
+    }
+
+    private func purgeDiscardedMedia() {
+        ImageResizer.clearCaches()
+        if captures.isEmpty {
+            mergeDraft = ""
+            mergeTranslation = ""
+        }
+        if !isBusy {
+            MLXRuntime.releaseAll()
+        }
+    }
+
+    func refreshMemory() {
+        let snapshot = MLXRuntime.probe()
+        memoryLabel = snapshot.description
+        Self.memoryLog.info("\(snapshot.description, privacy: .public)")
     }
 
     private func prepareOCR() async throws {
@@ -544,38 +604,47 @@ final class AppModel {
         refreshSourceDisplay()
     }
 
-    private func ocrItem(_ item: CaptureItem) async {
-        updateCapture(item.id) { $0.stage = .recognizing }
-        let request = OCRRequest(
-            image: item.image,
-            maxTokens: OCRInputSettings.maxTokens(percent: ocrInputPercent),
-            maxPixels: ocrPixelBudget
-        )
+    private func ocrItem(_ id: UUID) async {
+        updateCapture(id) { $0.stage = .recognizing }
+        let result: OCRResult
         do {
-            let result: OCRResult
+            guard let jpeg = captures.first(where: { $0.id == id })?.jpegData(), !jpeg.isEmpty
+            else {
+                updateCapture(id) { $0.stage = .ocrFailed("Screenshot data is missing.") }
+                return
+            }
+            let request = OCRRequest(
+                jpeg: jpeg,
+                maxTokens: OCRInputSettings.maxTokens(percent: ocrInputPercent),
+                maxPixels: ocrPixelBudget
+            )
             if remote.useRemoteOCR {
                 result = try await OpenAICompatibleClient(settings: remote).transcribe(request)
             } else {
                 result = try await engine.transcribe(request)
             }
-            updateCapture(item.id) { capture in
-                capture.ocrText = result.text
-                capture.translatedText = ""
-                capture.translatedTarget = nil
-                capture.stage = .ocrReady
-            }
         } catch {
-            updateCapture(item.id) { $0.stage = .ocrFailed(error.localizedDescription) }
-        }
-    }
-
-    private func translateItem(_ item: CaptureItem) async {
-        let text = captures.first(where: { $0.id == item.id })?.ocrText ?? item.ocrText
-        guard !text.isEmpty else {
-            updateCapture(item.id) { $0.stage = .translateFailed("No OCR text to translate.") }
+            updateCapture(id) { $0.stage = .ocrFailed(error.localizedDescription) }
             return
         }
-        updateCapture(item.id) { $0.stage = .translating }
+        updateCapture(id) { capture in
+            capture.ocrText = result.text
+            capture.translatedText = ""
+            capture.translatedTarget = nil
+            capture.discardPixels()
+            capture.stage = .ocrReady
+        }
+        ImageResizer.clearCaches()
+        refreshMemory()
+    }
+
+    private func translateItem(_ id: UUID) async {
+        let text = captures.first(where: { $0.id == id })?.ocrText ?? ""
+        guard !text.isEmpty else {
+            updateCapture(id) { $0.stage = .translateFailed("No OCR text to translate.") }
+            return
+        }
+        updateCapture(id) { $0.stage = .translating }
         let request = TranslateRequest(
             text: text,
             sourceLanguage: .auto,
@@ -590,13 +659,13 @@ final class AppModel {
                 result = try await translator.translate(request)
             }
             let target = targetLanguage
-            updateCapture(item.id) { capture in
+            updateCapture(id) { capture in
                 capture.translatedText = result.text
                 capture.translatedTarget = target
                 capture.stage = .translated
             }
         } catch {
-            updateCapture(item.id) { $0.stage = .translateFailed(error.localizedDescription) }
+            updateCapture(id) { $0.stage = .translateFailed(error.localizedDescription) }
         }
     }
 

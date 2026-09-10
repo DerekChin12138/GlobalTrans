@@ -1,12 +1,10 @@
 import AppKit
 import GlobalTransCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct StatusPanel: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @State private var importerPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -39,7 +37,7 @@ struct StatusPanel: View {
                 .disabled(!model.canAddCapture)
 
                 Button("Open File…") {
-                    importerPresented = true
+                    model.importFromOpenPanel()
                 }
                 .disabled(!model.canAddCapture)
 
@@ -81,7 +79,7 @@ struct StatusPanel: View {
 
             CaptureStrip(model: model)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Text("Translate to")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -91,9 +89,11 @@ struct StatusPanel: View {
                     }
                 }
                 .labelsHidden()
-                .controlSize(.mini)
-                .frame(maxWidth: .infinity)
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .fixedSize()
                 .disabled(model.isBusy)
+                Spacer(minLength: 0)
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -177,20 +177,17 @@ struct StatusPanel: View {
             Text("Hotkey: ⌥⌘O caches a screenshot · OCR and Translate are manual")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text(model.memoryLabel)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .help("phys_footprint · IOSurface/external · MLX active+cache")
         }
         .padding(14)
-        .frame(width: 420, height: 700)
+        .frame(width: 420, height: 718)
         .background(StatusPanelWindowMarker())
         .onAppear {
             StatusItemContextMenu.install()
-        }
-        .fileImporter(
-            isPresented: $importerPresented,
-            allowedContentTypes: [.pdf, .png, .jpeg, .heic, .tiff, .image]
-        ) { result in
-            if case .success(let url) = result {
-                Task { await model.importFile(url: url) }
-            }
+            model.refreshMemory()
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard model.canAddCapture, let url = urls.first else { return false }
@@ -244,8 +241,9 @@ private struct CaptureStrip: View {
             HStack(spacing: 6) {
                 ForEach(Array(model.captures.enumerated()), id: \.element.id) { index, item in
                     CaptureThumb(
-                        item: item,
+                        thumbnail: item.thumbnailImage,
                         index: index + 1,
+                        badge: item.stage.badge,
                         selected: item.id == model.selectedID,
                         onSelect: { model.selectCapture(item.id) },
                         onRemove: { model.removeCapture(item.id) }
@@ -266,15 +264,16 @@ private struct CaptureStrip: View {
 }
 
 private struct CaptureThumb: View {
-    let item: CaptureItem
+    let thumbnail: NSImage
     let index: Int
+    let badge: String
     let selected: Bool
     let onSelect: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Image(nsImage: item.thumbnail)
+            Image(nsImage: thumbnail)
                 .resizable()
                 .scaledToFill()
                 .frame(width: 64, height: 52)
@@ -289,7 +288,7 @@ private struct CaptureThumb: View {
                         .padding(3)
                 }
                 .overlay(alignment: .bottom) {
-                    Text(item.stage.badge)
+                    Text(badge)
                         .font(.system(size: 8, weight: .semibold))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
@@ -319,7 +318,7 @@ private struct CaptureThumb: View {
         .clipped()
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
-        .help("Screenshot \(index) · \(item.stage.badge)")
+        .help("Screenshot \(index) · \(badge)")
     }
 }
 

@@ -183,8 +183,6 @@ public final class HunyuanV1DenseModel: Module, LLMModel, KVCacheDimensionProvid
     fileprivate let model: HunyuanV1DenseInner
     private let configuration: HunyuanV1DenseConfiguration
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
-    /// Dequantized tied embeddings. `quantizedMM` zeros ~half the vocab logits for this 120818-row table.
-    private var _tiedHeadWeight: MLXArray?
 
     public init(_ args: HunyuanV1DenseConfiguration) {
         self.configuration = args
@@ -207,25 +205,45 @@ public final class HunyuanV1DenseModel: Module, LLMModel, KVCacheDimensionProvid
     }
 
     private func tiedHead(_ hidden: MLXArray) -> MLXArray {
-        if let weight = _tiedHeadWeight {
-            return matmul(hidden, weight.T)
-        }
         if let quantized = model.embedTokens as? QuantizedEmbedding {
-            let weight = dequantized(
-                quantized.weight,
-                scales: quantized.scales,
-                biases: quantized.biases,
-                groupSize: quantized.groupSize,
-                bits: quantized.bits,
-                mode: quantized.mode,
-                dtype: .bfloat16
-            )
-            eval(weight)
-            _tiedHeadWeight = weight
-            return matmul(hidden, weight.T)
+            return quantizedAsLinearChunked(hidden, embedding: quantized)
         }
         return model.embedTokens.asLinear(hidden)
     }
+
+    /// `quantizedMM` zeros rows past 65536 on this 120818-row table.
+    /// Chunk so we never `eval` a ~500MB bf16 copy that Metal keeps after unload.
+    private func quantizedAsLinearChunked(
+        _ hidden: MLXArray,
+        embedding: QuantizedEmbedding
+    ) -> MLXArray {
+        let vocab = configuration.vocabularySize
+        let maxRows = 32_768
+        if vocab <= maxRows {
+            return embedding.asLinear(hidden)
+        }
+        var parts: [MLXArray] = []
+        var start = 0
+        while start < vocab {
+            let end = min(start + maxRows, vocab)
+            parts.append(
+                quantizedMM(
+                    hidden,
+                    embedding.weight[start..<end],
+                    scales: embedding.scales[start..<end],
+                    biases: embedding.biases.map { $0[start..<end] },
+                    transpose: true,
+                    groupSize: embedding.groupSize,
+                    bits: embedding.bits,
+                    mode: embedding.mode
+                )
+            )
+            start = end
+        }
+        return concatenated(parts, axis: -1)
+    }
+
+    func releaseScratch() {}
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var weights = weights

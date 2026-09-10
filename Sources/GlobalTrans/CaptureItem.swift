@@ -1,5 +1,4 @@
 import AppKit
-import CoreImage
 import Foundation
 import GlobalTransCore
 
@@ -48,12 +47,28 @@ struct CaptureItem: Identifiable {
     let id: UUID
     let createdAt: Date
     let kind: CaptureKind
-    let image: CIImage
-    let thumbnail: NSImage
+    /// JPEG on disk. Uncompressed Retina RGBA is 60–80 MB and must not stay in RAM.
+    var jpegURL: URL?
+    var thumbPNG: Data
     var ocrText = ""
     var translatedText = ""
     var translatedTarget: TranslateLanguage?
     var stage: CaptureStage = .queued
+
+    func jpegData() -> Data? {
+        guard let jpegURL else { return nil }
+        return CaptureStore.load(jpegURL)
+    }
+
+    var thumbnailImage: NSImage {
+        NSImage(data: thumbPNG) ?? NSImage(size: NSSize(width: 72, height: 72))
+    }
+
+    mutating func discardPixels() {
+        CaptureStore.remove(jpegURL)
+        jpegURL = nil
+        thumbPNG = Data()
+    }
 
     func needsTranslate(to target: TranslateLanguage) -> Bool {
         switch stage {
@@ -68,34 +83,15 @@ struct CaptureItem: Identifiable {
 
     static let cacheLimit = 5
 
-    static func make(
-        image: CIImage,
-        kind: CaptureKind
-    ) -> CaptureItem {
-        CaptureItem(
+    static func make(cgImage: CGImage, kind: CaptureKind) -> CaptureItem {
+        let encoded = ImageResizer.encodedJPEGAndThumb(cgImage)
+        let jpegURL = try? CaptureStore.writeJPEG(encoded.jpeg)
+        return CaptureItem(
             id: UUID(),
             createdAt: Date(),
             kind: kind,
-            image: image,
-            thumbnail: thumbnailImage(from: image)
+            jpegURL: jpegURL,
+            thumbPNG: encoded.thumb
         )
-    }
-
-    private static func thumbnailImage(from image: CIImage, maxSide: CGFloat = 72) -> NSImage {
-        let extent = image.extent
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        let cgImage = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: colorSpace)
-        let size: NSSize
-        if extent.width > 0, extent.height > 0 {
-            let scale = min(maxSide / extent.width, maxSide / extent.height, 1)
-            size = NSSize(width: max(extent.width * scale, 1), height: max(extent.height * scale, 1))
-        } else {
-            size = NSSize(width: maxSide, height: maxSide)
-        }
-        if let cgImage {
-            return NSImage(cgImage: cgImage, size: size)
-        }
-        return NSImage(size: size)
     }
 }

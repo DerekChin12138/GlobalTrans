@@ -37,6 +37,14 @@ if IDENTITY="$("$ROOT/Scripts/ensure-signing-identity.sh" 2>/dev/null)" && [[ -n
   SIGN_IDENTITY="$IDENTITY"
 fi
 
+swift package resolve
+python3 "$ROOT/Scripts/patch-mlx-mediaprocessing.py"
+# Force those two files to recompile after the checkout patch.
+rm -f \
+  "$ROOT/.build/arm64-apple-macosx/release/MLXVLM.build/MediaProcessing.swift.o" \
+  "$ROOT/.build/arm64-apple-macosx/release/MLXVLM.build/Qwen3VL.swift.o" \
+  "$ROOT/.build/release/MLXVLM.build/MediaProcessing.swift.o" \
+  "$ROOT/.build/release/MLXVLM.build/Qwen3VL.swift.o"
 swift build -c release --product GlobalTrans
 BIN="$ROOT/.build/release/GlobalTrans"
 APP="${GT_APP_PATH:-$ROOT/.build/GlobalTrans.app}"
